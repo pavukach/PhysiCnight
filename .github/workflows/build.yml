@@ -1,9 +1,12 @@
 name: Build
 
 # Required repository secrets:
-#   UNITY_LICENSE  - contents of the Unity license file (.xml)
+#   UNITY_LICENSE  - contents of the Unity license file (.ulf)
 #   UNITY_EMAIL    - Unity account email
 #   UNITY_PASSWORD - Unity account password
+#
+# One-time setup for GitHub Pages:
+#   Settings -> Pages -> Build and deployment -> Source: GitHub Actions
 
 on:
   push:
@@ -13,10 +16,6 @@ on:
 
 permissions:
   contents: read
-
-concurrency:
-  group: build-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   build:
@@ -62,3 +61,82 @@ jobs:
           name: PhysiCnight-${{ matrix.targetPlatform }}
           path: build
           if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download builds
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Package builds
+        run: |
+          mkdir -p release
+          for dir in artifacts/*/; do
+            name="$(basename "$dir")"
+            (cd "$dir" && zip -qr "../../release/${name}.zip" .)
+          done
+          ls -lh release
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: build-${{ github.sha }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/*.zip --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" release/*.zip \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Build ${GITHUB_SHA::7}" \
+              --notes "Automated build for ${GITHUB_SHA}."
+          fi
+
+  pages:
+    name: Deploy WebGL
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: github-pages
+      cancel-in-progress: false
+    steps:
+      - name: Download WebGL build
+        uses: actions/download-artifact@v4
+        with:
+          name: PhysiCnight-WebGL
+          path: webgl
+
+      - name: Prepare site
+        run: |
+          mkdir -p site
+          index="$(find webgl -name index.html -print -quit)"
+          if [ -z "$index" ]; then
+            echo "index.html not found in WebGL build"
+            find webgl -maxdepth 4 -type f | head -50
+            exit 1
+          fi
+          cp -R "$(dirname "$index")/." site/
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
